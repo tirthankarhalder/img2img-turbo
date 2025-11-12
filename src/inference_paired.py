@@ -8,6 +8,67 @@ import torchvision.transforms.functional as F
 from pix2pix_turbo import Pix2Pix_Turbo
 from image_prep import canny_from_pil
 
+def run_inference_single(input_image_path, prompt, model_path=None, model_name='', 
+                         use_fp16=False, low_threshold=100, high_threshold=200, 
+                         gamma=0.4, seed=42, device=None):
+    """
+    Run inference for a single (image, prompt) pair and return the output PIL image.
+    Mirrors the CLI logic for direct Python import.
+    """
+    import torch
+    import numpy as np
+    from PIL import Image
+    from torchvision import transforms
+    import torchvision.transforms.functional as F
+    from pix2pix_turbo import Pix2Pix_Turbo
+    from image_prep import canny_from_pil
+
+    if model_name == '' and model_path == '':
+        raise ValueError("Either model_name or model_path must be provided")
+
+    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    model = Pix2Pix_Turbo(pretrained_name=model_name, pretrained_path=model_path)
+    model.set_eval()
+    if use_fp16:
+        model.half()
+    model.to(device)
+
+    input_image = Image.open(input_image_path).convert('RGB')
+    new_width = input_image.width - input_image.width % 8
+    new_height = input_image.height - input_image.height % 8
+    input_image = input_image.resize((new_width, new_height), Image.LANCZOS)
+
+    with torch.no_grad():
+        if model_name == 'edge_to_image':
+            canny = canny_from_pil(input_image, low_threshold, high_threshold)
+            c_t = F.to_tensor(canny).unsqueeze(0).to(device)
+            if use_fp16:
+                c_t = c_t.half()
+            output_image = model(c_t, prompt)
+
+        elif model_name == 'sketch_to_image_stochastic':
+            image_t = F.to_tensor(input_image) < 0.5
+            c_t = image_t.unsqueeze(0).to(device).float()
+            torch.manual_seed(seed)
+            B, C, H, W = c_t.shape
+            noise = torch.randn((1, 4, H // 8, W // 8), device=c_t.device)
+            if use_fp16:
+                c_t = c_t.half()
+                noise = noise.half()
+            output_image = model(c_t, prompt, deterministic=False, r=gamma, noise_map=noise)
+
+        else:
+            c_t = F.to_tensor(input_image).unsqueeze(0).to(device)
+            if use_fp16:
+                c_t = c_t.half()
+            output_image = model(c_t, prompt)
+
+        output_pil = transforms.ToPILImage()(output_image[0].cpu() * 0.5 + 0.5)
+
+    return output_pil
+
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--input_image', type=str, required=True, help='path to the input image')
